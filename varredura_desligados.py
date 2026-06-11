@@ -248,10 +248,38 @@ def desativar_as(unidade: str, login: str) -> bool:
     except Exception:
         return False
 
+import unicodedata as _ud
+
+def _normalizar(texto: str) -> str:
+    texto = _ud.normalize("NFD", str(texto).lower())
+    texto = "".join(c for c in texto if _ud.category(c) != "Mn")
+    return re.sub(r"[^a-z0-9 ]", " ", texto).strip()
+
+def _login_bate_nome(login: str, nome_planilha: str) -> bool:
+    """Compara login (nome.sobrenome) com nome completo da planilha."""
+    partes_login  = set(_normalizar(login).replace(".", " ").split())
+    palavras_nome = set(w for w in _normalizar(nome_planilha).split() if len(w) > 2)
+    return len(partes_login & palavras_nome) >= 2
+
+def _montar_achado_as(u: dict, row, unidade: str) -> dict:
+    return {
+        "sistema":       "Activesoft",
+        "unidade":       unidade,
+        "nome_sistema":  u.get("nome", ""),
+        "nome_planilha": row["nome"],
+        "login":         u.get("login", ""),
+        "cpf":           row["cpf"],
+        "matricula":     row["matricula"],
+        "ultimo_dia":    row["ultimo_dia"],
+        "origem":        row["origem"],
+        "user_id":       None,
+        "status_acao":   None,
+    }
+
 def cruzar_activesoft(df: pd.DataFrame) -> list:
     resultados = []
+    logins_ja_adicionados = set()
     cpfs_desligados = set(df[df["cpf"] != ""]["cpf"])
-    mats_desligados = set(df[df["matricula"] != ""]["matricula"])
 
     for unidade in TOKENS:
         print(f"  Activesoft [{unidade}] — buscando...", end=" ")
@@ -265,30 +293,27 @@ def cruzar_activesoft(df: pd.DataFrame) -> list:
         print(f"{len(ativos)} ativos")
 
         for u in ativos:
-            cpf_as = normalizar_cpf(u.get("cpf") or u.get("documento") or "")
-            mat_as = str(u.get("matricula") or u.get("registro") or "").strip()
+            login = u.get("login", "")
+            chave = f"{unidade}:{login}"
+            if chave in logins_ja_adicionados:
+                continue
 
-            match = pd.DataFrame()
-            if cpf_as and cpf_as in cpfs_desligados:
-                match = df[df["cpf"] == cpf_as]
-            elif mat_as and mat_as in mats_desligados:
-                match = df[df["matricula"] == mat_as]
+            # Estratégia 1: login é um CPF
+            cpf_login = normalizar_cpf(login)
+            if cpf_login and cpf_login in cpfs_desligados:
+                match = df[df["cpf"] == cpf_login]
+                if not match.empty:
+                    resultados.append(_montar_achado_as(u, match.iloc[0], unidade))
+                    logins_ja_adicionados.add(chave)
+                    continue
 
-            if not match.empty:
-                row = match.iloc[0]
-                resultados.append({
-                    "sistema":       "Activesoft",
-                    "unidade":       unidade,
-                    "nome_sistema":  u.get("nome", ""),
-                    "nome_planilha": row["nome"],
-                    "login":         u.get("login", ""),
-                    "cpf":           cpf_as or row["cpf"],
-                    "matricula":     mat_as or row["matricula"],
-                    "ultimo_dia":    row["ultimo_dia"],
-                    "origem":        row["origem"],
-                    "user_id":       None,
-                    "status_acao":   None,
-                })
+            # Estratégia 2: cruzamento por nome via login (nome.sobrenome)
+            for _, row in df.iterrows():
+                if row["nome"] and _login_bate_nome(login, row["nome"]):
+                    resultados.append(_montar_achado_as(u, row, unidade))
+                    logins_ja_adicionados.add(chave)
+                    break
+
     return resultados
 
 # ─────────────────────────────────────────────────────────────────────────────
